@@ -1,0 +1,80 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=F}
+library(rvest)
+library(dplyr)
+library(jsonlite)
+library(lubridate)
+library(purrr)
+library(fs)
+library(readr)
+library(tidyr)
+```
+
+```{r}
+
+# download latest month's data
+# https://www.tepco.co.jp/forecast/html/images/eria_jukyu_202412_03.csv
+
+# get current date
+current_date <- Sys.Date()
+
+# Extract the year and month
+year <- format(current_date, "%Y")
+month <- format(current_date, "%m")
+
+# Construct the URL for the previous month's data
+url <- paste0("https://www.tepco.co.jp/forecast/html/images/eria_jukyu_", year, month, "_03.csv")
+
+# Define the destination file path
+destfile <- paste0("TEPCO_", year, "_", month, ".csv")
+
+# Download the file
+download.file(url, destfile, mode = "wb")
+
+# Read the CSV file into R
+tepco_data <- read.csv(destfile)
+
+
+# accumulate current historical data
+
+setwd("C:/Users/SN/Documents/Sehun Nakama/Projects/Japan Energy Data/Japan_Energy_v1/RAW_Tokyo")
+list.files()
+
+# initiate data frame
+
+# Define the column names and types
+columns <- c("DATE", "TIME", "エリア需要", "原子力", "火力.LNG.", "火力.石炭.", 
+             "火力.石油.", "火力.その他.", "水力", "地熱", "バイオマス", 
+             "太陽光発電実績", "太陽光出力制御量", "風力発電実績", "風力出力制御量", 
+             "揚水", "蓄電池", "連系線", "その他", "合計")
+
+types <- c("character", "character", "integer", "integer", "integer", "integer", 
+           "integer", "integer", "integer", "integer", "integer", "integer", 
+           "integer", "integer", "integer", "integer", "integer", "integer", 
+           "integer", "integer")
+
+# Create an empty data frame
+historic_dat <- setNames(data.frame(matrix(ncol = length(columns), nrow = 0)), columns)
+
+# Set the column types
+for (i in seq_along(types)) {
+  class(historic_dat[[i]]) <- types[i]
+}
+
+# View the structure of the data frame
+str(historic_dat)
+
+for (i in unique(list.files())) {
+  temp <- read.csv(i, skip = 1)
+  historic_dat <- historic_dat %>% add_row(temp)
+}
+
+getwd()
+write.csv(historic_dat, "historical_data.csv", row.names = F, fileEncoding = "UTF-8")
+```
+
+
