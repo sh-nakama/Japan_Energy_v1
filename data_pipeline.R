@@ -43,6 +43,42 @@ scrape_website <- function(url) {
   })
 }
 
+# Function to parse date and time columns
+parse_datetime <- function(date_col, time_col) {
+  # Combine date and time columns
+  datetime <- paste(date_col, time_col)
+  # Parse to POSIXct
+  as.POSIXct(datetime, format = "%Y/%m/%d %H:%M")
+}
+
+# Function to extract half-hour from time string
+get_half_hour <- function(time_col) {
+  tryCatch({
+    # Handle different time formats
+    # For "HH:MM" format
+    if (all(grepl("^\\d{1,2}:\\d{2}$", time_col))) {
+      return(time_col)
+    }
+    
+    # For "HHMM" format
+    if (all(grepl("^\\d{4}$", time_col))) {
+      return(sprintf("%02d:%02d", 
+                     as.integer(substr(time_col, 1, 2)),
+                     as.integer(substr(time_col, 3, 4))))
+    }
+    
+    # For other formats, try to convert using lubridate
+    times <- hms::as_hms(time_col)
+    return(format(times, "%H:%M"))
+    
+  }, error = function(e) {
+    message("Error processing time format: ", e$message)
+    return(time_col)
+  })
+}
+
+
+
 # Function to process raw data
 process_data <- function(raw_data) {
   tryCatch({
@@ -69,20 +105,123 @@ process_data <- function(raw_data) {
   })
 }
 
+# Function to aggregate historical data by year-month
+aggregate_by_month_halfhour <- function(data) {
+  tryCatch({
+    if(!"TIME" %in% names(data)) {
+      stop("TIME column not found in data")
+    }
+    
+    if(!"DATE" %in% names(data)) {
+      stop("DATE column not found in data")
+    }
+    
+    # Create datetime and extract components
+    processed_data <- data %>%
+      mutate(
+        # Ensure TIME column is character
+        TIME = as.character(TIME),
+        # Extract half-hour
+        half_hour = get_half_hour(TIME),
+        # Create month from DATE
+        month = format(as.Date(DATE), "%Y-%m")
+      )
+    
+    # Print sample of processed time data for debugging
+    message("Sample of processed times:")
+    print(head(data.frame(
+      original_time = processed_data$TIME,
+      half_hour = processed_data$half_hour
+    )))
+    
+    # Proceed with aggregation
+    processed_data %>%
+      group_by(month, half_hour) %>%
+      summarise(
+        across(
+          where(is.numeric),
+          ~mean(., na.rm = TRUE)
+        ),
+        n_observations = n(),
+        .groups = "drop"
+      ) %>%
+      arrange(month, half_hour) %>%
+      mutate(
+        across(
+          where(is.numeric),
+          ~round(.)
+        )
+      )
+  }, error = function(e) {
+    message("Error aggregating data: ", e$message)
+    message("Data structure:")
+    str(data)
+    return(NULL)
+  })
+}
+
+# Helper function to check time format
+check_time_format <- function(data) {
+  if(!"TIME" %in% names(data)) {
+    return(FALSE)
+  }
+  
+  time_sample <- head(data$TIME)
+  message("Sample TIME values: ", paste(time_sample, collapse = ", "))
+  
+  return(TRUE)
+}
+
+
+# Function to prepare data for area plot
+prepare_area_plot_data <- function(aggregated_data, selected_months = NULL) {
+  plot_data <- aggregated_data
+  
+  # Filter for selected months if specified
+  if (!is.null(selected_months)) {
+    plot_data <- plot_data %>%
+      filter(month %in% selected_months)
+  }
+}
+
+# Function to get specific metrics from aggregated data
+get_monthly_metrics <- function(aggregated_data, metric_name) {
+  # Get all columns related to the specified metric
+  metric_cols <- grep(paste0("^", metric_name, "_"), names(aggregated_data), value = TRUE)
+  
+  if(length(metric_cols) > 0) {
+    aggregated_data %>%
+      select(year_month, all_of(metric_cols))
+  } else {
+    message("Metric not found in aggregated data")
+    return(NULL)
+  }
+}
+
 # Function to load historical data
-load_historical_data <- function() {
+load_historical_data <- function(aggregate = FALSE) {
   historical_file <- paste0(getwd(),"/",file.path("data", "historical", "historical_data.csv"))
   
   if(file_exists(historical_file)) {
     tryCatch({
-      historical_data <- read_csv(historical_file, show_col_types = FALSE)
-      return(historical_data)
+      # Read the data with specified column types
+      data <- read_csv(historical_file, 
+                       col_types = cols(.default = col_integer(),
+                                        DATE = col_character(),
+                                        TIME = col_character()))
+      
+      # Return aggregated data if requested
+      if(aggregate) {
+        return(aggregate_by_month_halfhour(data))
+      }
+      
+      return(data)
     }, error = function(e) {
       message("Error loading historical data: ", e$message)
       return(NULL)
     })
   } else {
-    message("No historical data file found. Will create new one.")
+    message("No historical data file found.")
     return(NULL)
   }
 }
@@ -90,35 +229,39 @@ load_historical_data <- function() {
 # Function to append new data to historical data
 append_to_historical <- function(new_data) {
   tryCatch({
-    historical_file <- file.path("data", "historical", "historical_data.csv")
+    historical_file <- paste0(getwd(), "/", file.path("data", "historical", "historical_data.csv"))
     
-    # Load existing historical data
-    historical_data <- load_historical_data()
+    # Check if file exists and read it
+    existing_data <- read_historical_csv(historical_file)
     
-    if(is.null(historical_data)) {
-      # If no historical data exists, create new file with new data
-      write_csv(new_data, historical_file)
-      message("Created new historical data file")
+    # Prepare the data to be written
+    if(is.null(existing_data)) {
+      data_to_write <- new_data
+      message("Creating new historical data file")
     } else {
-      # Combine historical and new data
-      combined_data <- bind_rows(historical_data, new_data) %>%
-        # Remove duplicates based on timestamp and other relevant columns
-        distinct(date, .keep_all = TRUE) %>%
-        # Sort by timestamp
-        arrange(desc(timestamp))
-      
-      # Write back to CSV
-      write_csv(combined_data, historical_file)
-      message("Successfully appended new data to historical file")
+      data_to_write <- bind_rows(existing_data, new_data) %>%
+        # Remove duplicates based on DATE and TIME
+        distinct(DATE, TIME, .keep_all = TRUE) %>%
+        # Sort by DATE and TIME
+        arrange(desc(DATE), desc(TIME))
+      message("Combining with existing historical data")
     }
     
-    # Create a backup
-    backup_file <- file.path("data", "historical", 
-                             paste0("historical_data_backup_", 
-                                    format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"))
-    file_copy(historical_file, backup_file)
+    # Create directories if they don't exist
+    dir_create(dirname(historical_file))
     
+    # Write the data
+    write_csv(data_to_write, historical_file)
+    
+    # Create a backup
+    backup_file <- paste0(getwd(), "/", file.path("data", "historical", 
+                                                  paste0("historical_data_backup_", 
+                                                         format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")))
+    file_copy(historical_file, backup_file, overwrite = TRUE)
+    
+    message("Successfully saved and backed up data")
     return(TRUE)
+    
   }, error = function(e) {
     message("Error updating historical data: ", e$message)
     return(FALSE)

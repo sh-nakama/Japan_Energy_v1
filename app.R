@@ -44,6 +44,8 @@ load_dashboard_data <- function() {
   return(generate_sample_data())
 }
 
+
+
 # Custom CSS
 css <- sass::sass(
   sass::sass_file("www/custom.scss")
@@ -121,18 +123,22 @@ ui <- dashboardPage(
         tabName = "analysis",
         fluidRow(
           box(
-            width = 6,
-            title = "Category Distribution",
+            width = 12,
+            title = "Monthly Energy Demand Patterns",
             status = "primary",
             solidHeader = TRUE,
-            plotlyOutput("category_plot")
-          ),
-          box(
-            width = 6,
-            title = "Metric Correlation",
-            status = "primary",
-            solidHeader = TRUE,
-            plotlyOutput("correlation_plot")
+            height = "600px",
+            div(
+              style = "position: absolute; right: 20px; top: 10px; z-index: 1000;",
+              selectizeInput(
+                "selected_months",
+                "Select Months to Compare",
+                choices = NULL,
+                multiple = TRUE,
+                options = list(maxItems = 3)
+              )
+            ),
+            plotlyOutput("intraday_generation_plot", height = "500px")
           )
         )
       )
@@ -145,10 +151,22 @@ server <- function(input, output, session) {
   
   # Reactive data load
   dashboard_data <- reactiveVal()
+  aggregated_data <- reactiveVal()
   
   # Initialize data
   observe({
-    dashboard_data(load_dashboard_data())
+    # Load and aggregate data
+    raw_data <- load_historical_data(aggregate = FALSE)
+    agg_data <- aggregate_by_month_halfhour(load_historical_data(aggregate = FALSE))
+    aggregated_data(agg_data)
+    
+    # Update month choices
+    if (!is.null(agg_data)) {
+      months <- unique(agg_data$month)
+      updateSelectizeInput(session, "selected_months",
+                           choices = months,
+                           selected = tail(months, 2))
+    }
   })
   
   # Add refresh button to UI
@@ -207,7 +225,7 @@ server <- function(input, output, session) {
   # Raw data table
   output$raw_table <- renderDT({
     # Get the current value of dashboard_data
-    data <- dashboard_data()
+    data <- load_historical_data(aggregate = FALSE)()
     
     # Verify we have data before rendering
     req(data)
@@ -245,27 +263,60 @@ server <- function(input, output, session) {
     )
   })
   
-  # # Category distribution plot
-  # output$category_plot <- renderPlotly({
-  #   plot_ly(dashboard_data, x = ~category, y = ~count, type = "bar",
-  #           marker = list(color = 'rgb(158,202,225)')) %>%
-  #     layout(
-  #       title = "Category Distribution",
-  #       xaxis = list(title = "Category"),
-  #       yaxis = list(title = "Count")
-  #     )
-  # })
-  
-  # # Correlation plot
-  # output$correlation_plot <- renderPlotly({
-  #   plot_ly(dashboard_data, x = ~metric_1, y = ~metric_2, type = "scatter", mode = "markers",
-  #           marker = list(color = 'rgb(158,202,225)')) %>%
-  #     layout(
-  #       title = "Metric 1 vs Metric 2",
-  #       xaxis = list(title = "Metric 1"),
-  #       yaxis = list(title = "Metric 2")
-  #     )
-  # })
+  # Create the area plot
+  output$intraday_generation_plot <- renderPlotly({
+    # Get the data
+    agg_data <- aggregated_data()
+    selected <- input$selected_months
+    
+    req(agg_data, selected, length(selected) > 0)
+    
+    # Prepare data for plotting
+    plot_data <- prepare_area_plot_data(agg_data, selected)
+    
+    # Create the plot
+    plot <- plot_ly(plot_data, x = ~half_hour) %>%
+      layout(
+        template = "plotly_dark",
+        paper_bgcolor = "rgba(0,0,0,0)",
+        plot_bgcolor = "rgba(0,0,0,0)",
+        title = list(
+          text = "Average Intraday generation by Month",
+          font = list(size = 20)
+        ),
+        xaxis = list(
+          title = "Time of Day",
+          tickangle = 45,
+          gridcolor = "rgba(255,255,255,0.1)",
+          tickfont = list(size = 10)
+        ),
+        yaxis = list(
+          title = "Energy Demand (MW)",
+          gridcolor = "rgba(255,255,255,0.1)"
+        ),
+        showlegend = TRUE,
+        hovermode = "x unified"
+      )
+    
+    # Add a trace for each selected month
+    for (month in selected) {
+      plot <- plot %>%
+        add_trace(
+          y = as.numeric(plot_data[[month]]),
+          name = month,
+          type = "scatter",
+          mode = "lines",
+          fill = "tonexty",
+          fillcolor = paste0("rgba(", 
+                             sample(50:200, 1), ",",
+                             sample(50:200, 1), ",",
+                             sample(50:200, 1), ",0.2)"),
+          line = list(width = 2)
+        )
+    }
+    
+    plot
+  })
 }
 
 # Run the app
